@@ -1,1 +1,0 @@
-# konmik-extension-by-fhrii
