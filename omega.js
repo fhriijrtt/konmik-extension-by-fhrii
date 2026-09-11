@@ -1,9 +1,9 @@
-class OmegaScans {
-    constructor() {
-        this.baseUrl = "https://omegascans.org";
-        this.name = "Omega Scans";
-    }
+module.exports = {
+    name: "Omega Scans",
+    baseUrl: "https://omegascans.org",
+    lang: "en",
 
+    // 1. Ambil Daftar / Katalog Komik
     async getList(page = 1) {
         try {
             const res = await fetch(`${this.baseUrl}/comics?page=${page}`);
@@ -36,8 +36,9 @@ class OmegaScans {
             console.error("Error getList:", e);
             return [];
         }
-    }
+    },
 
+    // 2. Ambil Detail Komik & Daftar Chapter
     async getDetail(url) {
         try {
             const res = await fetch(url);
@@ -75,8 +76,9 @@ class OmegaScans {
             console.error("Error getDetail:", e);
             return null;
         }
-    }
+    },
 
+    // 3. Ambil Gambar Reader
     async getPages(url) {
         try {
             const res = await fetch(url);
@@ -103,7 +105,4 @@ class OmegaScans {
             return [];
         }
     }
-}
-
-// Mengembalikan instans secara eksplisit untuk loader KonMIk
-new OmegaScans();
+};
