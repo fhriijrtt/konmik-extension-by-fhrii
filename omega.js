@@ -1,210 +1,109 @@
-module.exports = {
-    name: "Omega Scans",
-    baseUrl: "https://omegascans.org",
-    lang: "en",
+// ID: ext_omega_scans
+// NAME: Omega Scans
+// VERSION: 1.1.0
+// COLOR: #7C3AED
+// ICON: https://omegascans.org/favicon.ico
+// REFERER: https://omegascans.org/
 
-    // 1. Ambil Katalog via API / JSON Payload
-    async getList(page = 1) {
-        try {
-            // Menembak endpoint API / data payload Next.js
-            const res = await fetch(`${this.baseUrl}/api/comics?page=${page}&query=`);
-            if (!res.ok) {
-                // Fallback jika API utama membutuhkan query RSC
-                const rscRes = await fetch(`${this.baseUrl}/comics?_rsc=1e5ao`);
-                const rscText = await rscRes.text();
-                return this.parseRSC(rscText);
-            }
-            const data = await res.json();
+const SITE = 'https://omegascans.org';
+const API = 'https://api.omegascans.org';
+const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36',
+    'Referer': SITE + '/',
+};
 
-            const list = [];
-            const comics = data.comics || data.data || data;
+async function fetchJson(url) {
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+}
 
-            if (Array.isArray(comics)) {
-                comics.forEach(item => {
-                    list.push({
-                        title: item.title || item.name,
-                        url: `${this.baseUrl}/series/${item.slug || item.id}`,
-                        cover: item.thumbnail || item.cover || item.image || ""
-                    });
+function absUrl(u) {
+    if (!u) return '';
+    if (u.startsWith('http')) return u;
+    if (u.startsWith('//')) return 'https:' + u;
+    return SITE + (u.startsWith('/') ? '' : '/') + u;
+}
+
+function fmtDate(d) {
+    if (!d) return '-';
+    const t = new Date(d);
+    return isNaN(t.getTime()) ? '-' : t.toISOString().split('T')[0];
+}
+
+const KonmikExtension = {
+    async getList(page, query, filters) {
+        const p = page || 1;
+        let url = `${API}/query?page=${p}&perPage=20&adult=true&series_type=Comic&status=All&orderBy=latest&order=desc`;
+        if (query) url += `&query_string=${encodeURIComponent(query)}`;
+
+        const json = await fetchJson(url);
+        const items = json.data || [];
+
+        const mangaList = items.map(s => ({
+            id: s.series_slug,
+            title: (s.title || '').trim(),
+            cover_url: absUrl(s.thumbnail),
+            rating: '10.0',
+            views: s.total_views != null ? String(s.total_views) : '-',
+        })).filter(m => m.id && m.title);
+
+        return { manga_list: mangaList };
+    },
+
+    async getDetail(slug) {
+        const s = await fetchJson(`${API}/series/${slug}`);
+
+        // Ambil semua chapter (paginasi)
+        const chapters = [];
+        let cp = 1;
+        let last = 1;
+        do {
+            const j = await fetchJson(
+                `${API}/chapter/query?page=${cp}&perPage=100&query=&order=desc&series_id=${s.id}`
+            );
+            for (const c of (j.data || [])) {
+                let title = c.chapter_name || 'Chapter';
+                if (c.chapter_title) title += ' - ' + c.chapter_title;
+                if (c.price && c.price > 0) title += ' 🔒';
+                chapters.push({
+                    id: `${s.series_slug || slug}/${c.chapter_slug}`,
+                    title: title.trim(),
+                    date: fmtDate(c.created_at),
                 });
             }
+            last = (j.meta && j.meta.last_page) || 1;
+            cp++;
+        } while (cp <= last && cp <= 50);
 
-            return list;
-        } catch (e) {
-            console.error("Error getList API:", e);
-            return [];
-        }
+        const author = s.author || s.studio || 'Unknown';
+        const genres = Array.isArray(s.tags) ? s.tags.map(t => t.name).filter(Boolean) : [];
+
+        return {
+            title: (s.title || '').trim(),
+            cover_url: absUrl(s.thumbnail),
+            description: (s.description || 'Tidak ada deskripsi.').replace(/<[^>]*>/g, '').trim(),
+            rating: '10.0',
+            views: s.total_views != null ? String(s.total_views) : '-',
+            genres: genres.length ? genres : ['Comic'],
+            author: author,
+            artist: author,
+            chapters: chapters,
+        };
     },
 
-    // Helper untuk memproses data jika server merespons format RSC Text
-    parseRSC(text) {
-        const list = [];
-        try {
-            const matches = text.match(/\{"id":.*?"title":.*?\}/g);
-            if (matches) {
-                matches.forEach(jsonStr => {
-                    try {
-                        const item = JSON.parse(jsonStr);
-                        if (item.title && (item.slug || item.id)) {
-                            list.push({
-                                title: item.title,
-                                url: `${this.baseUrl}/series/${item.slug || item.id}`,
-                                cover: item.thumbnail || item.cover || ""
-                            });
-                        }
-                    } catch (err) {}
-                });
-            }
-        } catch (e) {}
-        return list;
+    async getChapterImages(chapterId) {
+        // chapterId = "series_slug/chapter_slug"
+        const j = await fetchJson(`${API}/chapter/${chapterId}`);
+        const raw =
+            (j.chapter && j.chapter.chapter_data && j.chapter.chapter_data.images) ||
+            (j.chapter_data && j.chapter_data.images) ||
+            j.data ||
+            [];
+        return raw
+            .map(img => (typeof img === 'string' ? img : img.url || img.src || ''))
+            .filter(Boolean)
+            .map(absUrl);
     },
-
-    // 2. Ambil Detail & Chapter List via API
-    async getDetail(url) {
-        try {
-            const slug = url.split('/').pop();
-            const res = await fetch(`${this.baseUrl}/api/series/${slug}`);
-            
-            if (res.ok) {
-                const data = await res.json();
-                const chapters = (data.chapters || []).map(ch => ({
-                    name: ch.name || `Chapter ${ch.chapter_name || ch.number}`,
-                    url: `${this.baseUrl}/series/${slug}/${ch.slug || ch.id}`
-                }));
-
-                return {
-                    title: data.title || "",
-                    description: data.description || "",
-                    cover: data.thumbnail || data.cover || "",
-                    chapters: chapters
-                };
-            }
-
-            // Fallback scraping standar jika API khusus detail di-block
-            const htmlRes = await fetch(url);
-            const html = await htmlRes.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, "text/html");
-
-            const chapters = [];
-            doc.querySelectorAll("a[href*='/chapter/'], a[href*='/series/']").forEach(el => {
-                if (el.getAttribute("href")?.includes(slug)) {
-                    chapters.push({
-                        name: el.innerText.trim() || "Chapter",
-                        url: el.getAttribute("href").startsWith("http") ? el.getAttribute("href") : this.baseUrl + el.getAttribute("href")
-                    });
-                }
-            });
-
-            return {
-                title: doc.querySelector("h1")?.innerText.trim() || "Omega Comic",
-                description: doc.querySelector("p")?.innerText.trim() || "",
-                cover: doc.querySelector("img")?.getAttribute("src") || "",
-                chapters: chapters
-            };
-        } catch (e) {
-            console.error("Error getDetail:", e);
-            return null;
-        }
-    },
-
-    // 3. Ambil Gambar Reader
-    async getPages(url) {
-        try {
-            const res = await fetch(url);
-            const html = await res.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, "text/html");
-
-            const pages = [];
-            // Mengambil semua tag img di area baca
-            const imgElements = doc.querySelectorAll("img");
-
-            imgElements.forEach((img) => {
-                const src = img.getAttribute("data-src") || img.getAttribute("src") || img.getAttribute("data-lazy-src");
-                if (src && (src.includes("storage") || src.includes("uploads") || src.includes("media") || src.includes("chapter"))) {
-                    const cleanUrl = src.startsWith("http") ? src : this.baseUrl + src;
-                    if (!pages.includes(cleanUrl)) {
-                        pages.push(cleanUrl);
-                    }
-                }
-            });
-
-            return pages;
-        } catch (e) {
-            console.error("Error getPages:", e);
-            return [];
-        }
-    }
-};            return [];
-        }
-    },
-
-    // 2. Ambil Detail Komik & Daftar Chapter
-    async getDetail(url) {
-        try {
-            const res = await fetch(url);
-            const html = await res.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, "text/html");
-
-            const title = doc.querySelector("h1")?.innerText.trim() || "";
-            const description = doc.querySelector("p.description, .synopsis, div.summary")?.innerText.trim() || "";
-            const cover = doc.querySelector("img.cover, meta[property='og:image']")?.getAttribute("content") 
-                       || doc.querySelector("img.cover")?.getAttribute("src") || "";
-
-            const chapters = [];
-            const chapterElements = doc.querySelectorAll("a[href*='/chapter/']");
-
-            chapterElements.forEach(el => {
-                const name = el.innerText ? el.innerText.trim() : "Chapter";
-                const chapterUrl = el.getAttribute("href");
-
-                if (chapterUrl) {
-                    chapters.push({
-                        name: name,
-                        url: chapterUrl.startsWith("http") ? chapterUrl : this.baseUrl + chapterUrl
-                    });
-                }
-            });
-
-            return {
-                title: title,
-                description: description,
-                cover: cover,
-                chapters: chapters
-            };
-        } catch (e) {
-            console.error("Error getDetail:", e);
-            return null;
-        }
-    },
-
-    // 3. Ambil Gambar Reader
-    async getPages(url) {
-        try {
-            const res = await fetch(url);
-            const html = await res.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, "text/html");
-
-            const pages = [];
-            const imgElements = doc.querySelectorAll("div.reader-images img, div.page-break img, img.chapter-img, div.p-2 img");
-
-            imgElements.forEach((img) => {
-                const src = img.getAttribute("data-src") || img.getAttribute("src");
-                if (src && !src.includes("logo") && !src.includes("banner")) {
-                    const cleanUrl = src.startsWith("http") ? src : this.baseUrl + src;
-                    if (!pages.includes(cleanUrl)) {
-                        pages.push(cleanUrl);
-                    }
-                }
-            });
-
-            return pages;
-        } catch (e) {
-            console.error("Error getPages:", e);
-            return [];
-        }
-    }
 };
