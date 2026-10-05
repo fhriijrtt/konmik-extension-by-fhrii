@@ -13,10 +13,16 @@ const headers = {
     'Referer': SITE + '/',
 };
 
+// PERBAIKAN 1: Gunakan await res.text() lalu JSON.parse()
 async function fetchJson(url) {
     const res = await fetch(url, { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
+    const text = await res.text();
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        throw new Error('Gagal melakukan parse JSON dari server');
+    }
 }
 
 function absUrl(u) {
@@ -53,7 +59,10 @@ const KonmikExtension = {
     },
 
     async getDetail(slug) {
-        const s = await fetchJson(`${API}/series/${slug}`);
+        const resJson = await fetchJson(`${API}/series/${slug}`);
+        
+        // PERBAIKAN 2: Pastikan mengambil object yang benar jika API membungkusnya dalam "data"
+        const s = resJson.data || resJson;
 
         // Ambil semua chapter (paginasi)
         const chapters = [];
