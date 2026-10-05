@@ -624,4 +624,311 @@ async function listFallback(p, q, category) {
             }
             note('search: kosong (status ' + r.status + ')');
         } catch (e) {
-        
+            note('search: ' + errMsg(e).slice(0, 60));
+        }
+        return { rows: [], total: 0 };
+    }
+    // 2) halaman daftar (SSR): /komik/list?page=N&category=...
+    const qs = [];
+    if (p > 1) qs.push('page=' + p);
+    if (category) qs.push('category=' + category);
+    const url = SITE + '/komik/list' + (qs.length ? '?' + qs.join('&') : '');
+    try {
+        const pg = await fetchPage(url);
+        let rows = [];
+        if (pg.data) rows = collectComics(pg.data);
+        if (!rows.length) rows = parseListHtml(pg.html);
+        if (rows.length) return { rows: rows, total: totalPagesOf(pg.html) };
+        note('list html: 0 komik, status ' + pg.status + ' len=' + pg.html.length);
+    } catch (e) {
+        note('list html: ' + errMsg(e).slice(0, 60));
+    }
+    // 3) data JSON Next.js (kalau situs memakai pages router)
+    try {
+        const j = await fetchNextJson('/komik/list.json' + (qs.length ? '?' + qs.join('&') : ''));
+        const rows = j ? collectComics(j) : [];
+        if (rows.length) return { rows: rows, total: 0 };
+        note('next json: ' + (j ? '0 komik' : 'tidak ada'));
+    } catch (e) {
+        note('next json: ' + errMsg(e).slice(0, 60));
+    }
+    return { rows: [], total: 0 };
+}
+
+// Info komik dari halaman detail (judul, sinopsis, genre, rating, chapter terbaru)
+function parseDetailHtml(html) {
+    const h = String(html || '');
+    const info = { title: '', cover: '', synopsis: '', genres: [], rating: '', latest: 0 };
+
+    const h1 = h.indexOf('<h1');
+    if (h1 >= 0) {
+        const a = h.indexOf('>', h1);
+        const b = h.indexOf('</h1>', a);
+        if (a >= 0 && b > a) info.title = stripHtml(h.slice(a + 1, b));
+    }
+    if (!info.title) {
+        const ot = metaContent(h, 'og:title');
+        const k = ot.indexOf(' \u2014 ');
+        info.title = k > 0 ? ot.slice(0, k) : ot;
+    }
+    info.cover = metaContent(h, 'og:image');
+
+    const clean = removeBlocks(removeBlocks(h, 'script'), 'style');
+    const blocks = clean.split('<h2');
+    for (let i = 1; i < blocks.length; i++) {
+        const e = blocks[i].indexOf('</h2>');
+        if (e < 0) continue;
+        const head = stripHtml(blocks[i].slice(blocks[i].indexOf('>') + 1, e));
+        if (head.toLowerCase().indexOf('sinopsis') === 0) {
+            info.synopsis = stripHtml(blocks[i].slice(e + 5)).slice(0, 3000);
+            break;
+        }
+    }
+
+    const text = stripHtml(clean);
+    if (!info.synopsis) {
+        const s = text.indexOf('Sinopsis');
+        const e = text.indexOf('Informasi seri', s + 1);
+        if (s >= 0 && e > s) {
+            let seg = text.slice(s + 8, e).trim();
+            if (info.title && seg.indexOf(info.title) === 0) seg = seg.slice(info.title.length).trim();
+            info.synopsis = seg;
+        }
+    }
+
+    const seenG = {};
+    eachAnchor(clean, function (href, inner) {
+        if (String(href).indexOf('/komik/genre/') < 0) return;
+        const g = stripHtml(inner);
+        if (g && !seenG[g]) {
+            seenG[g] = true;
+            info.genres.push(g);
+        }
+    });
+
+    const rm = text.match(/(\d+(?:\.\d+)?)\s*\/\s*5(?:\.0)?/);
+    if (rm) info.rating = rm[1];
+
+    let lm = text.match(/Chapter Terbaru\s*:?\s*Chapter\s*(\d+(?:\.\d+)?)/i);
+    if (!lm) lm = metaContent(h, 'description').match(/terbaru Chapter (\d+(?:\.\d+)?)/i);
+    if (lm) info.latest = parseFloat(lm[1]);
+    return info;
+}
+
+// Daftar chapter 001..N disusun dari "Chapter Terbaru" (dipakai kalau API tidak tersedia)
+function buildChapterList(latest) {
+    const out = [];
+    if (!(latest >= 1)) return out;
+    const top = Math.min(Math.floor(latest), 3000);
+    if (latest !== Math.floor(latest)) out.push({ chapter: pad3(String(latest)) });
+    for (let n = top; n >= 1; n--) out.push({ chapter: pad3(n) });
+    return out;
+}
+
+// Cari _id chapter tertentu di daftar chapter
+function findChapterId(rows, num) {
+    const want = parseFloat(num);
+    for (let i = 0; i < rows.length; i++) {
+        const c = rows[i];
+        if (c && (c._id || c.id) && parseFloat(c.chapter) === want) return String(c._id || c.id);
+    }
+    return '';
+}
+
+function toGenres(s) {
+    const g = s.Genre || s.genre || s.genres || [];
+    if (typeof g === 'string') return g.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (Array.isArray(g)) {
+        return g.map(function (x) { return typeof x === 'string' ? x : (x && (x.name || x.title)); }).filter(Boolean);
+    }
+    return [];
+}
+
+// ==========================================
+// 5. KONTRAK WAJIB KONMIK EXTENSION
+// ==========================================
+
+const KonmikExtension = {
+
+    // Daftar komik (katalog + pencarian)
+    async getList(page, query, filters) {
+        const p = page || 1;
+        const q = String(query || '').trim();
+        const rating = (filters && filters.rating) ? String(filters.rating).toLowerCase() : 'normal';
+        let path = '/komik?page=' + p + '&limit=24&sortBy=newKomik&name=' + enc(q);
+        if (!q) path += '&contentRating=' + enc(rating);
+
+        try {
+            let rows = null;
+            let apiOk = false;
+            const json = await tryApi(path);
+            if (json) {
+                apiOk = true;
+                rows = Array.isArray(json) ? json : (json.data || []);
+            }
+
+            if (!rows || rows.length === 0) {
+                if (apiOk && (q || p > 1)) return { manga_list: [] };
+                const fb = await listFallback(p, q, rating === 'normal' ? '' : rating);
+                if (fb.total && p > fb.total) return { manga_list: [] };
+                if (fb.rows.length) {
+                    rows = fb.rows;
+                    // halaman >1 yang isinya sama dengan halaman 1 = fallback tidak mendukung paging
+                    if (!q) {
+                        const key = rating + '#';
+                        const first = rows[0].title_slug || rows[0].slug;
+                        if (p === 1) _firstSlug[key] = first;
+                        else if (_firstSlug[key] === first) return { manga_list: [] };
+                    }
+                } else {
+                    if (q || p > 1) return { manga_list: [] };
+                    return debugCard('DEBUG: daftar kosong | ' + diag());
+                }
+            }
+
+            const list = mapRows(rows);
+            if (list.length === 0) {
+                return debugCard('DEBUG: field slug tidak ketemu, keys=' + Object.keys(rows[0]).join(',').slice(0, 150));
+            }
+            return { manga_list: list };
+        } catch (e) {
+            return debugCard('ERROR: ' + errMsg(e).slice(0, 150) + ' | ' + diag());
+        }
+    },
+
+    // Detail komik + semua chapter. slug = title_slug
+    async getDetail(slug) {
+        _lastSlug = baseSlug(slug);
+        let comic = null;
+        let pageChapters = [];
+        let info = { title: '', cover: '', synopsis: '', genres: [], rating: '', latest: 0 };
+        try {
+            const pg = await fetchPage(SITE + '/' + pageSlugOf(slug));
+            info = parseDetailHtml(pg.html);
+            if (pg.data) {
+                comic = findComic(pg.data);
+                pageChapters = collectChapters(pg.data);
+            }
+            if (!info.title && !comic) note('detail html: status ' + pg.status + ' len=' + pg.html.length);
+        } catch (e) {
+            note('detail html: ' + errMsg(e).slice(0, 60));
+        }
+        const s = comic || {};
+
+        let all = [];
+        const ch = await tryApi('/komik/' + enc(slug) + '/chapter?limit=9999999');
+        if (ch) all = [].concat(ch.chapter || [], ch.newChapter || [], ch.startChapter || []);
+        if (!all.length) all = pageChapters;
+        if (!all.length) {
+            try {
+                const j = await fetchNextJson('/' + pageSlugOf(slug) + '.json');
+                if (j) all = collectChapters(j);
+            } catch (e) {
+                note('detail json: ' + errMsg(e).slice(0, 60));
+            }
+        }
+        if (!all.length) {
+            all = buildChapterList(info.latest);
+            if (all.length) note('chapter disusun 1..' + info.latest);
+        }
+
+        const title = s.title || info.title || humanize(slug);
+        const cover = coverUrl(s) || info.cover || '';
+
+        if (!all.length) {
+            // Tampilkan penyebabnya di layar (app menyembunyikan error yang dilempar)
+            return {
+                title: title,
+                cover_url: cover,
+                description: 'DEBUG: daftar chapter kosong | ' + diag(),
+                rating: '0.0',
+                views: '-',
+                genres: [],
+                author: '?',
+                artist: '?',
+                chapters: [{ id: 'debug|0|', title: 'DEBUG: ' + diag().slice(0, 200), date: '' }]
+            };
+        }
+
+        const seen = {};
+        const chapters = [];
+        for (let i = 0; i < all.length; i++) {
+            const c = all[i];
+            const num = String(c.chapter);
+            if (seen[num]) continue;
+            seen[num] = true;
+            chapters.push({
+                id: baseSlug(slug) + '|' + num + '|' + (c._id || c.id || ''),
+                title: 'Chapter ' + unpad(num),
+                date: c.updatedAt || c.createdAt || c.date || '',
+                _n: parseFloat(num)
+            });
+        }
+        chapters.sort(function (a, b) {
+            return (isNaN(b._n) ? -1 : b._n) - (isNaN(a._n) ? -1 : a._n);
+        });
+        const clean = chapters.map(function (c) { return { id: c.id, title: c.title, date: c.date }; });
+
+        const genres = toGenres(s);
+        const rating = s.rating ? String(s.rating) : (info.rating || '0.0');
+        return {
+            title: title,
+            cover_url: cover,
+            description: stripHtml(s.sinopsis || s.synopsis || s.description) || info.synopsis || 'Tidak ada deskripsi',
+            rating: rating,
+            views: (s.view || s.views || s.viewCount) ? String(s.view || s.views || s.viewCount) : '-',
+            genres: genres.length ? genres : info.genres,
+            author: s.author || '?',
+            artist: s.artist || s.author || '?',
+            chapters: clean
+        };
+    },
+
+    // Gambar chapter. chapterId = "title_slug|nomor_chapter|_id"
+    async getChapterImages(chapterId) {
+        const parts = String(chapterId).split('|');
+        if (parts.length < 2 || !parts[1] || parts[0] === 'debug') {
+            throw new Error('ID chapter tidak valid: ' + chapterId);
+        }
+        _lastSlug = baseSlug(parts[0]);
+        const fix = function (u) {
+            const s = String(u && typeof u === 'object' ? (u.url || u.src || '') : u);
+            return s.indexOf('//') === 0 ? 'https:' + s : s;
+        };
+
+        // 1) API (butuh session). Kalau _id belum ada, cari dari daftar chapter API
+        let cid = parts[2] || '';
+        if (!cid) {
+            const lst = await tryApi('/komik/' + enc(parts[0]) + '/chapter?limit=9999999');
+            if (lst) cid = findChapterId([].concat(lst.chapter || [], lst.newChapter || [], lst.startChapter || []), parts[1]);
+        }
+        if (cid) {
+            const json = await tryApi('/komik/' + enc(parts[0]) + '/chapter/' + enc(parts[1]) + '/imgs/' + enc(cid), 'chapter');
+            const imgs = json && Array.isArray(json.imageSrc) ? json.imageSrc : [];
+            if (imgs.length) return imgs.map(fix);
+        }
+
+        // 2) halaman reader: __NEXT_DATA__, data JSON Next.js, lalu HTML mentah
+        const slugs = [pageSlugOf(parts[0]), baseSlug(parts[0])];
+        for (let i = 0; i < slugs.length; i++) {
+            const route = '/' + slugs[i] + '/chapter/' + parts[1];
+            try {
+                const pg = await fetchPage(SITE + route);
+                let imgs = pg.data ? findImages(pg.data) : [];
+                if (!imgs.length) imgs = imagesFromHtml(pg.html);
+                if (imgs.length) return imgs.map(fix);
+                note('reader ' + slugs[i].slice(0, 20) + ': ' + pg.status + ' len=' + pg.html.length);
+            } catch (e) {
+                note('reader: ' + errMsg(e).slice(0, 60));
+            }
+            try {
+                const j = await fetchNextJson(route + '.json');
+                const imgs2 = j ? findImages(j) : [];
+                if (imgs2.length) return imgs2.map(fix);
+            } catch (e) {}
+        }
+        throw new Error('Gambar chapter tidak ditemukan | ' + diag());
+    }
+};
+
+// END softkomik.js
