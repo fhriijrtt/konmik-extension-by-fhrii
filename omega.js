@@ -1,149 +1,133 @@
-// ID: ext_omega_scans
+// ID: ext_omegascans
 // NAME: Omega Scans
-// VERSION: 1.1.2
+// VERSION: 1.1.0
 // COLOR: #7C3AED
 // ICON: https://omegascans.org/favicon.ico
 // REFERER: https://omegascans.org/
 
 const SITE = 'https://omegascans.org';
 const API = 'https://api.omegascans.org';
+
 const headers = {
-    'Accept': 'application/json, text/plain, */*',
-    // Menggunakan User-Agent Desktop standar (seperti Doujindesu) agar lebih aman dari blokir Cloudflare
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
     'Referer': SITE + '/',
-    'Origin': SITE
+    'Origin': SITE,
+    'Accept': 'application/json',
 };
 
-async function fetchJson(url) {
+async function getJson(url) {
     const res = await fetch(url, { headers });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const status = res.status || 200;
+    if (status < 200 || status >= 300) {
+        throw new Error('HTTP ' + status + ' untuk ' + url);
+    }
     const text = await res.text();
     try {
         return JSON.parse(text);
     } catch (e) {
-        throw new Error('Gagal parse JSON dari server');
+        throw new Error('Respons bukan JSON: ' + text.slice(0, 120));
     }
 }
 
-function absUrl(u) {
-    if (!u) return 'https://via.placeholder.com/150?text=No+Cover';
-    if (u.startsWith('http')) return u;
-    if (u.startsWith('//')) return 'https:' + u;
-    return SITE + (u.startsWith('/') ? '' : '/') + u;
+function fullUrl(path) {
+    if (!path) return '';
+    if (path.startsWith('http')) return path;
+    return API + (path.startsWith('/') ? '' : '/') + path;
 }
 
-function fmtDate(d) {
-    if (!d) return '-';
-    const t = new Date(d);
-    return isNaN(t.getTime()) ? '-' : t.toISOString().split('T')[0];
+function chapterNumber(name) {
+    const m = (name || '').match(/(\d+(?:\.\d+)?)/);
+    return m ? parseFloat(m[1]) : -1;
 }
 
 const KonmikExtension = {
+
+    // Daftar komik (katalog + pencarian)
     async getList(page, query, filters) {
-        try {
-            const p = page || 1;
-            let url = `${API}/query?page=${p}&perPage=20&adult=true&series_type=Comic&status=All&orderBy=latest&order=desc`;
-            if (query) url += `&query_string=${encodeURIComponent(query)}`;
+        const p = page || 1;
+        const url = API + '/query?page=' + p +
+            '&perPage=20&series_type=Comic' +
+            '&query_string=' + encodeURIComponent(query || '') +
+            '&order=desc&orderBy=latest&adult=true&status=All&tags_ids=[]';
 
-            const json = await fetchJson(url);
-            const items = json.data || [];
+        const json = await getJson(url);
+        const rows = Array.isArray(json) ? json : (json.data || []);
 
-            const mangaList = items.map(s => ({
-                // Menambahkan fallback (s.slug atau s.id) jika s.series_slug tidak ada
-                id: s.series_slug || s.slug || String(s.id || ''),
-                title: (s.title || s.name || 'Tanpa Judul').trim(),
-                cover_url: absUrl(s.thumbnail || s.cover || s.image),
-                rating: '10.0',
-                views: s.total_views != null ? String(s.total_views) : '-',
-            })).filter(m => m.id && m.title !== 'Tanpa Judul');
+        const mangaList = rows.map(m => ({
+            id: m.series_slug,
+            title: m.title,
+            cover_url: fullUrl(m.thumbnail),
+            rating: m.rating ? String(m.rating) : '0.0',
+            views: m.total_views ? String(m.total_views) : '-'
+        }));
 
-            // Jika berhasil fetch tapi data benar-benar kosong
-            if (mangaList.length === 0) {
-                return { 
-                    manga_list: [{
-                        id: 'debug_empty', 
-                        title: 'Data kosong. Format API mungkin berubah.', 
-                        cover_url: 'https://via.placeholder.com/150?text=Empty', 
-                        rating: '0', 
-                        views: '-'
-                    }]
-                };
-            }
-
-            return { manga_list: mangaList };
-
-        } catch (e) {
-            // TAMPILKAN ERROR SEBAGAI KOMIK (Smart Debugging)
-            return {
-                manga_list: [{
-                    id: 'error_debug',
-                    title: `ERROR: ${e.message}`,
-                    cover_url: 'https://via.placeholder.com/150?text=Error',
-                    rating: '0.0',
-                    views: 'Error'
-                }]
-            };
-        }
+        return { manga_list: mangaList };
     },
 
+    // Detail komik + semua chapter
     async getDetail(slug) {
-        // Mencegah error lanjutan jika user mengklik komik error
-        if (slug === 'error_debug' || slug === 'debug_empty') {
-            throw new Error("Ini hanya pesan error, tidak bisa dibuka.");
-        }
+        const json = await getJson(API + '/series/' + slug);
+        const s = (json.data && !json.title) ? json.data : json;
 
-        const resJson = await fetchJson(`${API}/series/${slug}`);
-        const s = resJson.data || resJson;
-
+        // Ambil chapter semua halaman
         const chapters = [];
-        let cp = 1;
-        let last = 1;
+        let page = 1;
+        let lastPage = 1;
         do {
-            const j = await fetchJson(
-                `${API}/chapter/query?page=${cp}&perPage=100&query=&order=desc&series_id=${s.id}`
+            const cj = await getJson(
+                API + '/chapter/query?page=' + page +
+                '&perPage=100&series_id=' + s.id
             );
-            for (const c of (j.data || [])) {
-                let title = c.chapter_name || 'Chapter';
-                if (c.chapter_title) title += ' - ' + c.chapter_title;
-                if (c.price && c.price > 0) title += ' 🔒';
+            const rows = cj.data || [];
+            for (const c of rows) {
                 chapters.push({
-                    // Fallback keamanan untuk id chapter
-                    id: `${s.series_slug || s.slug || slug}/${c.chapter_slug || c.slug}`,
-                    title: title.trim(),
-                    date: fmtDate(c.created_at),
+                    id: slug + '/' + c.chapter_slug,
+                    title: c.chapter_name || c.chapter_title || 'Chapter',
+                    date: c.created_at || '',
+                    _n: chapterNumber(c.chapter_name),
+                    _id: c.id || 0
                 });
             }
-            last = (j.meta && j.meta.last_page) || 1;
-            cp++;
-        } while (cp <= last && cp <= 50);
+            lastPage = (cj.meta && cj.meta.last_page) ? cj.meta.last_page : 1;
+            page++;
+        } while (page <= lastPage && page <= 50);
 
-        const author = s.author || s.studio || 'Unknown';
-        const genres = Array.isArray(s.tags) ? s.tags.map(t => t.name).filter(Boolean) : [];
+        // Terbaru di atas
+        chapters.sort((a, b) => (b._n - a._n) || (b._id - a._id));
+        const cleanChapters = chapters.map(c => ({ id: c.id, title: c.title, date: c.date }));
+
+        let genres = [];
+        if (Array.isArray(s.tags)) {
+            genres = s.tags.map(t => (typeof t === 'string' ? t : t.name)).filter(Boolean);
+        }
 
         return {
-            title: (s.title || s.name || '').trim(),
-            cover_url: absUrl(s.thumbnail || s.cover || s.image),
-            description: (s.description || 'Tidak ada deskripsi.').replace(/<[^>]*>/g, '').trim(),
-            rating: '10.0',
-            views: s.total_views != null ? String(s.total_views) : '-',
-            genres: genres.length ? genres : ['Comic'],
-            author: author,
-            artist: author,
-            chapters: chapters,
+            title: s.title,
+            cover_url: fullUrl(s.thumbnail),
+            description: (s.description || 'Tidak ada deskripsi').replace(/<[^>]*>/g, '').trim(),
+            rating: s.rating ? String(s.rating) : '0.0',
+            views: s.total_views ? String(s.total_views) : '-',
+            genres: genres,
+            author: s.author || '?',
+            artist: s.studio || s.artist || '?',
+            chapters: cleanChapters
         };
     },
 
+    // Gambar halaman chapter. chapterId = "series_slug/chapter_slug"
     async getChapterImages(chapterId) {
-        const j = await fetchJson(`${API}/chapter/${chapterId}`);
-        const raw =
-            (j.chapter && j.chapter.chapter_data && j.chapter.chapter_data.images) ||
-            (j.chapter_data && j.chapter_data.images) ||
-            j.data ||
-            [];
-        return raw
-            .map(img => (typeof img === 'string' ? img : img.url || img.src || ''))
-            .filter(Boolean)
-            .map(absUrl);
+        const json = await getJson(API + '/chapter/' + chapterId);
+
+        let images = [];
+        if (Array.isArray(json.data) && json.data.length > 0) {
+            images = json.data;
+        } else if (json.chapter && json.chapter.chapter_data && Array.isArray(json.chapter.chapter_data.images)) {
+            images = json.chapter.chapter_data.images;
+        }
+
+        if (images.length === 0) {
+            throw new Error('Tidak ada gambar (chapter berbayar/terkunci?)');
+        }
+        return images.map(fullUrl);
     }
 };
