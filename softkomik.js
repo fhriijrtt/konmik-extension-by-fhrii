@@ -1,6 +1,6 @@
 // ID: ext_softkomik
 // NAME: Softkomik
-// VERSION: 1.1.0
+// VERSION: 1.1.1
 // COLOR: #F59E0B
 // ICON: https://softkomik.co/icon.jpg
 // REFERER: https://softkomik.co/
@@ -59,6 +59,13 @@ function readSetCookies(res) {
         if ((!v || !v.length) && typeof h.get === 'function') v = h.get('set-cookie') || h.get('Set-Cookie');
         if (!v) v = h['set-cookie'] || h['Set-Cookie'];
         if (!v && h.map) v = h.map['set-cookie'];
+        if ((!v || !v.length) && typeof h.entries === 'function') {
+            const found = [];
+            for (const e of h.entries()) {
+                if (String(e[0]).toLowerCase() === 'set-cookie') found.push(String(e[1]));
+            }
+            if (found.length) v = found;
+        }
         if (v) {
             if (Array.isArray(v)) list = v.slice();
             else list = String(v).split(/,(?=\s*[A-Za-z0-9_\-\.]+=)/);
@@ -70,12 +77,14 @@ function readSetCookies(res) {
 function headerShape(res) {
     try {
         const h = res.headers;
-        if (!h) return 'headers=tidak ada';
-        let keys = [];
-        try { keys = Object.keys(h); } catch (e) {}
-        return 'headers=' + (typeof h) + '[' + keys.slice(0, 6).join(',') + ']';
+        if (!h) return 'hdr=tidak ada';
+        const names = [];
+        if (typeof h.keys === 'function') {
+            for (const k of h.keys()) names.push(String(k));
+        }
+        return 'hdr=' + names.join('|').slice(0, 160);
     } catch (e) {
-        return 'headers=err';
+        return 'hdr=err ' + errMsg(e).slice(0, 40);
     }
 }
 
@@ -292,6 +301,63 @@ const KonmikExtension = {
             return { manga_list: list };
         } catch (e) {
             return debugCard('ERROR: ' + errMsg(e).slice(0, 150));
+        }
+    },
+
+    // Detail komik + semua chapter. slug = title_slug
+    async getDetail(slug) {
+        let s = null;
+        try { s = await fetchInfo(slug); } catch (e) { s = null; }
+        s = s || {};
+
+        const ch = await apiGet('/komik/' + enc(slug) + '/chapter?limit=9999999');
+        const all = [].concat(ch.chapter || [], ch.newChapter || [], ch.startChapter || []);
+
+        const seen = {};
+        const chapters = [];
+        for (let i = 0; i < all.length; i++) {
+            const c = all[i];
+            const num = String(c.chapter);
+            if (seen[num]) continue;
+            seen[num] = true;
+            chapters.push({
+                id: slug + '|' + num + '|' + (c._id || c.id || ''),
+                title: 'Chapter ' + num,
+                date: c.updatedAt || c.createdAt || c.date || '',
+                _n: parseFloat(num)
+            });
+        }
+        chapters.sort((a, b) => (isNaN(b._n) ? -1 : b._n) - (isNaN(a._n) ? -1 : a._n));
+        const clean = chapters.map(c => ({ id: c.id, title: c.title, date: c.date }));
+
+        return {
+            title: s.title || humanize(slug),
+            cover_url: coverUrl(s),
+            description: stripHtml(s.sinopsis || s.synopsis || s.description) || 'Tidak ada deskripsi',
+            rating: s.rating ? String(s.rating) : '0.0',
+            views: (s.view || s.views || s.viewCount) ? String(s.view || s.views || s.viewCount) : '-',
+            genres: toGenres(s),
+            author: s.author || '?',
+            artist: s.artist || s.author || '?',
+            chapters: clean
+        };
+    },
+
+    // Gambar chapter. chapterId = "title_slug|nomor_chapter|_id"
+    async getChapterImages(chapterId) {
+        const parts = String(chapterId).split('|');
+        if (parts.length < 3 || !parts[2]) {
+            throw new Error('ID chapter tidak lengkap: ' + chapterId);
+        }
+        const json = await apiGet('/komik/' + enc(parts[0]) + '/chapter/' + enc(parts[1]) + '/imgs/' + enc(parts[2]), 'chapter');
+        const imgs = Array.isArray(json.imageSrc) ? json.imageSrc : [];
+        if (imgs.length === 0) {
+            throw new Error('Data gambar chapter kosong.');
+        }
+        return imgs.map(u => (String(u).indexOf('//') === 0 ? 'https:' + u : String(u)));
+    }
+};
++ errMsg(e).slice(0, 150));
         }
     },
 
