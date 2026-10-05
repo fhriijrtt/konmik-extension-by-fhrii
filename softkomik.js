@@ -1,6 +1,6 @@
 // ID: ext_softkomik
 // NAME: Softkomik
-// VERSION: 1.0.1
+// VERSION: 1.1.0
 // COLOR: #F59E0B
 // ICON: https://softkomik.co/icon.jpg
 // REFERER: https://softkomik.co/
@@ -8,7 +8,11 @@
 const SITE = 'https://softkomik.co';
 const API = 'https://api.softkomik.org';
 const COVER_BASE = 'https://cover.softdevices.my.id/softkomik-cover';
-const SESSION_URL = SITE + '/api/session/chapter/oaisos';
+// Dua jenis session, sama seperti kode situs: 'list' (daftar komik & chapter) dan 'chapter' (gambar chapter)
+const SESSION_URLS = {
+    list: SITE + '/api/session/aksjkas',
+    chapter: SITE + '/api/session/chapter/oaisos',
+};
 
 // Token terikat ke User-Agent, jadi UA yang sama dipakai untuk ambil session dan request API
 const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36';
@@ -35,11 +39,81 @@ function parseJson(text) {
     }
 }
 
+// ---------- HTTP + cookie ----------
+
+const _jar = {};
+let _bootInfo = 'boot=belum';
+
+function cookieHeader() {
+    const k = Object.keys(_jar);
+    return k.map(n => n + '=' + _jar[n]).join('; ');
+}
+
+function readSetCookies(res) {
+    let list = [];
+    try {
+        const h = res.headers;
+        if (!h) return list;
+        let v = null;
+        if (typeof h.getSetCookie === 'function') v = h.getSetCookie();
+        if ((!v || !v.length) && typeof h.get === 'function') v = h.get('set-cookie') || h.get('Set-Cookie');
+        if (!v) v = h['set-cookie'] || h['Set-Cookie'];
+        if (!v && h.map) v = h.map['set-cookie'];
+        if (v) {
+            if (Array.isArray(v)) list = v.slice();
+            else list = String(v).split(/,(?=\s*[A-Za-z0-9_\-\.]+=)/);
+        }
+    } catch (e) {}
+    return list;
+}
+
+function headerShape(res) {
+    try {
+        const h = res.headers;
+        if (!h) return 'headers=tidak ada';
+        let keys = [];
+        try { keys = Object.keys(h); } catch (e) {}
+        return 'headers=' + (typeof h) + '[' + keys.slice(0, 6).join(',') + ']';
+    } catch (e) {
+        return 'headers=err';
+    }
+}
+
+function storeCookies(list) {
+    for (let i = 0; i < list.length; i++) {
+        const pair = String(list[i]).split(';')[0];
+        const eq = pair.indexOf('=');
+        if (eq > 0) _jar[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+    }
+}
+
 async function httpGet(url, headers) {
-    const res = await fetch(url, { headers: headers || baseHeaders });
+    const h = {};
+    const src = headers || baseHeaders;
+    Object.keys(src).forEach(k => { h[k] = src[k]; });
+    const ck = cookieHeader();
+    if (ck) h['Cookie'] = ck;
+    const res = await fetch(url, { headers: h });
     const status = res.status || 200;
     const text = await res.text();
-    return { status: status, text: text };
+    const sc = readSetCookies(res);
+    storeCookies(sc);
+    return { status: status, text: text, setCookies: sc.length, shape: headerShape(res) };
+}
+
+// Server menolak (404 kosong) request session tanpa cookie dari kunjungan halaman, jadi buka halaman dulu
+async function bootstrapCookies() {
+    try {
+        const r = await httpGet(SITE + '/komik/list', {
+            'User-Agent': UA,
+            'Accept': 'text/html,application/xhtml+xml',
+            'Referer': SITE + '/',
+        });
+        _bootInfo = 'boot=status ' + r.status + ' len=' + String(r.text || '').length +
+            ' set-cookie=' + r.setCookies + ' jar=' + Object.keys(_jar).join('+') + ' ' + r.shape;
+    } catch (e) {
+        _bootInfo = 'boot=ERR ' + errMsg(e).slice(0, 60);
+    }
 }
 
 function enc(s) {
@@ -84,39 +158,47 @@ function findComic(obj, depth) {
 
 // ---------- session (token + sign) ----------
 
-let _session = null;
+const _sess = {};
 
-async function getSession(force) {
-    if (!force && _session && Number(_session.ex) > Date.now() + 5000) return _session;
-    const r = await httpGet(SESSION_URL, baseHeaders);
+function tryParseSession(r) {
     const body = String(r.text || '');
-    if (r.status < 200 || r.status >= 300) {
-        throw new Error('SESSION HTTP ' + r.status + ' | ' + body.slice(0, 80));
-    }
-    if (!body.trim()) {
-        throw new Error('SESSION kosong (status ' + r.status + ', len=0)');
-    }
-    let d;
+    if (r.status < 200 || r.status >= 300 || !body.trim()) return null;
     try {
-        d = parseJson(body);
-    } catch (e) {
-        throw new Error('SESSION bukan JSON | len=' + body.length + ' | awal=' + body.slice(0, 60));
+        const d = JSON.parse(body);
+        if (d && d.token && d.sign) return d;
+    } catch (e) {}
+    return null;
+}
+
+async function getSession(kind, force) {
+    const cur = _sess[kind];
+    if (!force && cur && Number(cur.ex) > Date.now() + 5000) return cur;
+
+    const url = SESSION_URLS[kind];
+    let r = await httpGet(url, baseHeaders);
+    let d = tryParseSession(r);
+
+    if (!d) {
+        await bootstrapCookies();
+        r = await httpGet(url, baseHeaders);
+        d = tryParseSession(r);
     }
-    if (!d || !d.token || !d.sign) {
-        throw new Error('SESSION tanpa token/sign | keys=' + Object.keys(d || {}).join(',') + ' | awal=' + body.slice(0, 60));
+    if (!d) {
+        throw new Error('SESSION ' + kind + ' gagal: status ' + r.status + ' len=' + String(r.text || '').length +
+            ' | ' + _bootInfo + ' | awal=' + String(r.text || '').slice(0, 40));
     }
     // Sama seperti kode situs: buang bagian setelah "|oiq&"
     d.sign = String(d.sign).split('|oiq&')[0];
-    _session = d;
+    _sess[kind] = d;
     return d;
 }
 
-async function apiGet(path) {
+async function apiGet(path, kind) {
+    const k = kind || 'list';
     for (let attempt = 0; attempt < 2; attempt++) {
-        const s = await getSession(attempt > 0);
+        const s = await getSession(k, attempt > 0);
         const h = {};
-        const k = Object.keys(baseHeaders);
-        for (let i = 0; i < k.length; i++) h[k[i]] = baseHeaders[k[i]];
+        Object.keys(baseHeaders).forEach(n => { h[n] = baseHeaders[n]; });
         h['X-Token'] = s.token;
         h['X-Sign'] = s.sign;
         if (s.contentAccess && s.contentAccess.token && s.contentAccess.sign) {
@@ -127,7 +209,7 @@ async function apiGet(path) {
         const body = String(r.text || '');
         const empty = !body.trim();
         if ((r.status === 401 || r.status === 403 || empty) && attempt === 0) {
-            _session = null;
+            _sess[k] = null;
             continue;
         }
         if (r.status < 200 || r.status >= 300) {
@@ -258,7 +340,7 @@ const KonmikExtension = {
         if (parts.length < 3 || !parts[2]) {
             throw new Error('ID chapter tidak lengkap: ' + chapterId);
         }
-        const json = await apiGet('/komik/' + enc(parts[0]) + '/chapter/' + enc(parts[1]) + '/imgs/' + enc(parts[2]));
+        const json = await apiGet('/komik/' + enc(parts[0]) + '/chapter/' + enc(parts[1]) + '/imgs/' + enc(parts[2]), 'chapter');
         const imgs = Array.isArray(json.imageSrc) ? json.imageSrc : [];
         if (imgs.length === 0) {
             throw new Error('Data gambar chapter kosong.');
@@ -266,4 +348,3 @@ const KonmikExtension = {
         return imgs.map(u => (String(u).indexOf('//') === 0 ? 'https:' + u : String(u)));
     }
 };
-                            
