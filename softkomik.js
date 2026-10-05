@@ -10,6 +10,7 @@ const API = 'https://api.softkomik.org';
 const COVER_BASE = 'https://cover.softdevices.my.id/softkomik-cover';
 const SUFFIX = '-bahasa-indonesia';
 const SAMPLE_SLUG = 'the-demon-king-s-friend';
+const BUILD = 'b2'; // penanda isi file yang sedang jalan (muncul di gambar diagnosa)
 
 // Token terikat ke User-Agent, jadi UA yang sama dipakai di semua request
 const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36';
@@ -253,6 +254,7 @@ const SESSION_URLS = {
 const _sess = {};
 let _apiDownUntil = 0; // setelah session gagal, API dilewati sebentar agar fallback langsung jalan
 let _discovered = false;
+let _discInfo = '';
 let _lastSlug = SAMPLE_SLUG;
 
 function tryParseSession(r) {
@@ -283,6 +285,7 @@ async function discoverSession() {
     _discovered = true;
     const pages = [SITE + '/komik/list', SITE + '/' + pageSlugOf(_lastSlug) + '/chapter/001'];
     const seenJs = {};
+    const apiSeen = [];
     let count = 0;
     for (let p = 0; p < pages.length; p++) {
         let html = '';
@@ -293,7 +296,7 @@ async function discoverSession() {
             continue;
         }
         const srcs = scriptSrcs(html);
-        for (let i = 0; i < srcs.length && count < 24; i++) {
+        for (let i = 0; i < srcs.length && count < 16; i++) {
             const u = srcs[i];
             if (seenJs[u]) continue;
             seenJs[u] = true;
@@ -301,16 +304,19 @@ async function discoverSession() {
             count++;
             try {
                 const r = await httpGet(u, jsHeaders);
-                const found = r.text.match(/\/api\/session[A-Za-z0-9_\/\-]*/g) || [];
+                const found = r.text.match(/\/api\/[A-Za-z0-9_\/\-]{3,60}/g) || [];
                 for (let k = 0; k < found.length; k++) {
                     const sp = found[k];
-                    if (sp.length < 14 || sp.charAt(sp.length - 1) === '/') continue;
+                    if (sp.charAt(sp.length - 1) === '/') continue;
+                    if (apiSeen.indexOf(sp) < 0 && apiSeen.length < 14) apiSeen.push(sp);
+                    if (sp.toLowerCase().indexOf('session') < 0) continue;
                     if (sp.indexOf('chapter') >= 0) SESSION_URLS.chapter = SITE + sp;
                     else SESSION_URLS.list = SITE + sp;
                 }
             } catch (e) {}
         }
     }
+    _discInfo = 'js=' + count + ' api=' + apiSeen.join(',');
     note('disc: list=' + SESSION_URLS.list.slice(SITE.length) + ' ch=' + SESSION_URLS.chapter.slice(SITE.length) + ' js=' + count);
 }
 
@@ -744,6 +750,34 @@ function toGenres(s) {
     return [];
 }
 
+// Gambar berisi teks diagnosa (app menyembunyikan error, jadi ditampilkan sebagai halaman bacaan)
+function diagImage(msg) {
+    let raw = '[Softkomik ' + BUILD + '] ' + msg + (_discInfo ? ' || ' + _discInfo : '');
+    raw = raw.replace(/\s+/g, ' ').slice(0, 650);
+    const words = raw.split(' ');
+    const lines = [];
+    let cur = '';
+    for (let i = 0; i < words.length; i++) {
+        let w = words[i];
+        while (w.length > 30) {
+            if (cur) {
+                lines.push(cur);
+                cur = '';
+            }
+            lines.push(w.slice(0, 30));
+            w = w.slice(30);
+        }
+        if (cur && (cur + ' ' + w).length > 30) {
+            lines.push(cur);
+            cur = w;
+        } else {
+            cur = cur ? cur + ' ' + w : w;
+        }
+    }
+    if (cur) lines.push(cur);
+    return 'https://placehold.co/800x1200/111111/F59E0B/png?text=' + enc(lines.slice(0, 24).join('\\n'));
+}
+
 // ==========================================
 // 5. KONTRAK WAJIB KONMIK EXTENSION
 // ==========================================
@@ -927,7 +961,7 @@ const KonmikExtension = {
                 if (imgs2.length) return imgs2.map(fix);
             } catch (e) {}
         }
-        throw new Error('Gambar chapter tidak ditemukan | ' + diag());
+        return [diagImage('Gambar chapter tidak ditemukan | ' + diag())];
     }
 };
 
