@@ -266,3 +266,4 @@ const KonmikExtension = {
         return imgs.map(u => (String(u).indexOf('//') === 0 ? 'https:' + u : String(u)));
     }
 };
+                            
