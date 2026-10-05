@@ -1,6 +1,6 @@
 // ID: ext_softkomik
 // NAME: Softkomik
-// VERSION: 1.0.0
+// VERSION: 1.0.1
 // COLOR: #F59E0B
 // ICON: https://softkomik.co/icon.jpg
 // REFERER: https://softkomik.co/
@@ -89,12 +89,21 @@ let _session = null;
 async function getSession(force) {
     if (!force && _session && Number(_session.ex) > Date.now() + 5000) return _session;
     const r = await httpGet(SESSION_URL, baseHeaders);
+    const body = String(r.text || '');
     if (r.status < 200 || r.status >= 300) {
-        throw new Error('Session HTTP ' + r.status);
+        throw new Error('SESSION HTTP ' + r.status + ' | ' + body.slice(0, 80));
     }
-    const d = parseJson(r.text);
+    if (!body.trim()) {
+        throw new Error('SESSION kosong (status ' + r.status + ', len=0)');
+    }
+    let d;
+    try {
+        d = parseJson(body);
+    } catch (e) {
+        throw new Error('SESSION bukan JSON | len=' + body.length + ' | awal=' + body.slice(0, 60));
+    }
     if (!d || !d.token || !d.sign) {
-        throw new Error('Session tidak valid: ' + String(r.text).slice(0, 120));
+        throw new Error('SESSION tanpa token/sign | keys=' + Object.keys(d || {}).join(',') + ' | awal=' + body.slice(0, 60));
     }
     // Sama seperti kode situs: buang bagian setelah "|oiq&"
     d.sign = String(d.sign).split('|oiq&')[0];
@@ -115,14 +124,23 @@ async function apiGet(path) {
             h['X-Content-Sign'] = s.contentAccess.sign;
         }
         const r = await httpGet(API + path, h);
-        if ((r.status === 401 || r.status === 403) && attempt === 0) {
+        const body = String(r.text || '');
+        const empty = !body.trim();
+        if ((r.status === 401 || r.status === 403 || empty) && attempt === 0) {
             _session = null;
             continue;
         }
         if (r.status < 200 || r.status >= 300) {
-            throw new Error('HTTP ' + r.status + ' untuk ' + path);
+            throw new Error('API HTTP ' + r.status + ' | ' + body.slice(0, 80));
         }
-        return parseJson(r.text);
+        if (empty) {
+            throw new Error('API kosong (status ' + r.status + ') | token len=' + String(s.token).length + ' ex=' + s.ex);
+        }
+        try {
+            return parseJson(body);
+        } catch (e) {
+            throw new Error('API bukan JSON | len=' + body.length + ' | awal=' + body.slice(0, 60));
+        }
     }
     throw new Error('Session ditolak server (401/403)');
 }
