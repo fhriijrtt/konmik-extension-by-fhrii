@@ -24,9 +24,36 @@ async function getJson(url) {
     const text = await res.text();
     try {
         return JSON.parse(text);
-    } catch (e) {
-        throw new Error('Respons bukan JSON: ' + text.slice(0, 120));
+    } catch (e1) {
+        try {
+            // Buang BOM & karakter kontrol mentah yang bikin JSON.parse gagal di engine app
+            return JSON.parse(text.replace(/^\uFEFF/, '').replace(/[\u0000-\u001F]/g, ' '));
+        } catch (e2) {
+            const err = new Error('JSON gagal: ' + (e2 && e2.message ? e2.message : e2) +
+                ' | len=' + text.length + ' | akhir=' + text.slice(-40));
+            err.raw = text;
+            throw err;
+        }
     }
+}
+
+// Cadangan: ambil title/slug/cover langsung dengan regex kalau JSON.parse gagal
+function looseList(raw) {
+    const out = [];
+    const re = /"title":"((?:[^"\\]|\\.)*)"[\s\S]*?"series_slug":"([^"]+)"[\s\S]*?"thumbnail":"([^"]*)"/g;
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+        let title = m[1];
+        try { title = JSON.parse('"' + m[1] + '"'); } catch (e) {}
+        out.push({
+            id: m[2],
+            title: title,
+            cover_url: fullUrl(m[3].replace(/\\\//g, '/')),
+            rating: '0.0',
+            views: '-'
+        });
+    }
+    return out;
 }
 
 function fullUrl(path) {
@@ -46,7 +73,7 @@ const KonmikExtension = {
     async getList(page, query, filters) {
         const p = page || 1;
         const url = API + '/query?page=' + p +
-            '&perPage=20&series_type=Comic' +
+            '&perPage=12&series_type=Comic' +
             '&query_string=' + encodeURIComponent(query || '') +
             '&order=desc&orderBy=latest&adult=true&status=All&tags_ids=%5B%5D';
 
@@ -67,6 +94,10 @@ const KonmikExtension = {
             }
             return { manga_list: mangaList };
         } catch (e) {
+            if (e && e.raw) {
+                const loose = looseList(e.raw);
+                if (loose.length > 0) return { manga_list: loose };
+            }
             // Sementara: tampilkan error sebagai kartu supaya penyebabnya kelihatan di app
             return { manga_list: [{ id: 'debug', title: 'ERROR: ' + String(e && e.message ? e.message : e).slice(0, 150), cover_url: '', rating: '0.0', views: '-' }] };
         }
@@ -139,4 +170,3 @@ const KonmikExtension = {
         return images.map(fullUrl);
     }
 };
-  
