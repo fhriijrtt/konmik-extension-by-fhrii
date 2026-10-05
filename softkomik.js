@@ -1,5 +1,5 @@
 // ID: ext_softkomik
-// NAME: Softkomik
+// NAME: SoftKomik
 // VERSION: 1.0.0
 // COLOR: #F59E0B
 // ICON: https://softkomik.co/icon.jpg
