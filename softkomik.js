@@ -1,10 +1,11 @@
-// ID: ext_softkomik
+// ID: ext_softkomik2
 // NAME: Softkomik
-// VERSION: 1.1.1
+// VERSION: 1.1.2
 // COLOR: #F59E0B
 // ICON: https://softkomik.co/icon.jpg
 // REFERER: https://softkomik.co/
 
+const VER = '1.1.2';
 const SITE = 'https://softkomik.co';
 const API = 'https://api.softkomik.org';
 const COVER_BASE = 'https://cover.softdevices.my.id/softkomik-cover';
@@ -150,7 +151,7 @@ function coverUrl(m) {
 }
 
 function debugCard(text) {
-    return { manga_list: [{ id: 'debug', title: text, cover_url: '', rating: '0.0', views: '-' }] };
+    return { manga_list: [{ id: 'debug', title: '[v' + VER + '] ' + text, cover_url: '', rating: '0.0', views: '-' }] };
 }
 
 // Cari objek pertama yang punya title_slug di dalam JSON bersarang (untuk __NEXT_DATA__)
@@ -293,6 +294,71 @@ const KonmikExtension = {
                     cover_url: coverUrl(m),
                     rating: m.rating ? String(m.rating) : '0.0',
                     views: (m.view || m.views || m.viewCount) ? String(m.view || m.views || m.viewCount) : '-'
+                });
+            }
+            if (list.length === 0) {
+                return debugCard('DEBUG: field slug tidak ketemu, keys=' + Object.keys(rows[0]).join(',').slice(0, 150));
+            }
+            return { manga_list: list };
+        } catch (e) {
+            return debugCard('ERROR: ' + errMsg(e).slice(0, 150));
+        }
+    },
+
+    // Detail komik + semua chapter. slug = title_slug
+    async getDetail(slug) {
+        let s = null;
+        try { s = await fetchInfo(slug); } catch (e) { s = null; }
+        s = s || {};
+
+        const ch = await apiGet('/komik/' + enc(slug) + '/chapter?limit=9999999');
+        const all = [].concat(ch.chapter || [], ch.newChapter || [], ch.startChapter || []);
+
+        const seen = {};
+        const chapters = [];
+        for (let i = 0; i < all.length; i++) {
+            const c = all[i];
+            const num = String(c.chapter);
+            if (seen[num]) continue;
+            seen[num] = true;
+            chapters.push({
+                id: slug + '|' + num + '|' + (c._id || c.id || ''),
+                title: 'Chapter ' + num,
+                date: c.updatedAt || c.createdAt || c.date || '',
+                _n: parseFloat(num)
+            });
+        }
+        chapters.sort((a, b) => (isNaN(b._n) ? -1 : b._n) - (isNaN(a._n) ? -1 : a._n));
+        const clean = chapters.map(c => ({ id: c.id, title: c.title, date: c.date }));
+
+        return {
+            title: s.title || humanize(slug),
+            cover_url: coverUrl(s),
+            description: stripHtml(s.sinopsis || s.synopsis || s.description) || 'Tidak ada deskripsi',
+            rating: s.rating ? String(s.rating) : '0.0',
+            views: (s.view || s.views || s.viewCount) ? String(s.view || s.views || s.viewCount) : '-',
+            genres: toGenres(s),
+            author: s.author || '?',
+            artist: s.artist || s.author || '?',
+            chapters: clean
+        };
+    },
+
+    // Gambar chapter. chapterId = "title_slug|nomor_chapter|_id"
+    async getChapterImages(chapterId) {
+        const parts = String(chapterId).split('|');
+        if (parts.length < 3 || !parts[2]) {
+            throw new Error('ID chapter tidak lengkap: ' + chapterId);
+        }
+        const json = await apiGet('/komik/' + enc(parts[0]) + '/chapter/' + enc(parts[1]) + '/imgs/' + enc(parts[2]), 'chapter');
+        const imgs = Array.isArray(json.imageSrc) ? json.imageSrc : [];
+        if (imgs.length === 0) {
+            throw new Error('Data gambar chapter kosong.');
+        }
+        return imgs.map(u => (String(u).indexOf('//') === 0 ? 'https:' + u : String(u)));
+    }
+};
+tring(m.view || m.views || m.viewCount) : '-'
                 });
             }
             if (list.length === 0) {
