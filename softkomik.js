@@ -343,6 +343,277 @@ function imagesFromHtml(html) {
     return out.length >= 2 ? out : [];
 }
 
+function uniq(arr) {
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+        if (out.indexOf(arr[i]) < 0) out.push(arr[i]);
+    }
+    return out;
+}
+
+async function imgsViaApi(slug, num, id) {
+    const json = await tryApi('/komik/' + enc(slug) + '/chapter/' + enc(num) + '/imgs/' + enc(id), 'chapter');
+    return json && Array.isArray(json.imageSrc) ? json.imageSrc : [];
+}
+
+function pageSlugOf(slug) {
+    return /-bahasa-indonesia$/.test(slug) ? slug : slug + '-bahasa-indonesia';
+}
+
+// URL reader memakai nomor 3 digit: 1 -> 001, 88.1 -> 088.1
+function pad3(n) {
+    const s = String(n);
+    const m = s.match(/^(\d+)(\.\d+)?$/);
+    if (!m) return s;
+    let i = m[1];
+    while (i.length < 3) i = '0' + i;
+    return i + (m[2] || '');
+}
+
+// Ringkasan bentuk __NEXT_DATA__ untuk diagnosa
+function ndShape(data) {
+    if (!data) return 'ND=tidak ada';
+    const pp = (data.props && data.props.pageProps) || {};
+    const keys = Object.keys(pp);
+    let s = 'ND pp=' + keys.join(',').slice(0, 70);
+    for (let i = 0; i < keys.length; i++) {
+        const v = pp[keys[i]];
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+            s += ' ' + keys[i] + '{' + Object.keys(v).join(',').slice(0, 90) + '}';
+            break;
+        }
+    }
+    return s;
+}
+
+// Nomor chapter terbaru: dari teks "Chapter Terbaru: Chapter 18" atau field data komik
+function latestChapterOf(html, comic) {
+    const m = String(html || '').match(/Chapter\s*Terbaru[^0-9]*(\d+(?:\.\d+)?)/i);
+    if (m) return parseFloat(m[1]);
+    if (comic) {
+        const keys = Object.keys(comic);
+        for (let i = 0; i < keys.length; i++) {
+            if (/last|latest|terbaru|total.*chapter|chapter.*total/i.test(keys[i])) {
+                const v = comic[keys[i]];
+                const n = parseFloat(typeof v === 'object' && v ? (v.chapter || v.number || '') : v);
+                if (!isNaN(n) && n > 0) return n;
+            }
+        }
+    }
+    return 0;
+}
+
+// Cari _id chapter tertentu di data reader
+function findChapterId(obj, num) {
+    const want = parseFloat(num);
+    let id = '';
+    walk(obj, 0, o => {
+        if (!id && !Array.isArray(o) && o._id && o.chapter !== undefined && parseFloat(o.chapter) === want) id = String(o._id);
+    });
+    return id;
+}
+
+function mapRows(rows) {
+    const list = [];
+    for (let i = 0; i < rows.length; i++) {
+        const m = rows[i];
+        const id = m.title_slug || m.slug;
+        if (!id) continue;
+        list.push({
+            id: id,
+            title: m.title || humanize(id),
+            cover_url: coverUrl(m),
+            rating: m.rating ? String(m.rating) : '0.0',
+            views: (m.view || m.views || m.viewCount) ? String(m.view || m.views || m.viewCount) : '-'
+        });
+    }
+    return list;
+}
+
+const _firstSlug = {}; // slug pertama halaman 1 per query, untuk mendeteksi halaman yang sama berulang
+
+async function listFallback(p, q) {
+    // 1) endpoint pencarian milik situs sendiri (tanpa token)
+    if (q) {
+        try {
+            const r = await httpGet(SITE + '/api/content/search?name=' + enc(q) + (p > 1 ? '&page=' + p : ''), siteJsonHeaders);
+            if (String(r.text || '').trim()) {
+                const rows = collectComics(parseJson(r.text));
+                // Endpoint menjawab valid: kosong berarti memang tidak ada hasil, jangan jatuh ke daftar umum
+                return rows;
+            } else {
+                note('search: kosong (status ' + r.status + ')');
+            }
+        } catch (e) {
+            note('search: ' + errMsg(e).slice(0, 60));
+        }
+    }
+    // 2) halaman daftar (SSR) -> __NEXT_DATA__
+    const qs = (p > 1 ? 'page=' + p : '') + (q ? (p > 1 ? '&' : '') + 'name=' + enc(q) : '');
+    try {
+        const pg = await fetchPage(SITE + '/komik/list' + (qs ? '?' + qs : ''));
+        const rows = pg.data ? collectComics(pg.data) : [];
+        if (rows.length) return rows;
+        note('list html: ' + (pg.data ? '0 komik' : 'tanpa NEXT_DATA') + ' len=' + pg.html.length);
+    } catch (e) {
+        note('list html: ' + errMsg(e).slice(0, 60));
+    }
+    // 3) data JSON Next.js
+    try {
+        const j = await fetchNextJson('/komik/list.json' + (qs ? '?' + qs : ''));
+        const rows = j ? collectComics(j) : [];
+        if (rows.length) return rows;
+        note('next json: ' + (j ? '0 komik' : 'tidak ada'));
+    } catch (e) {
+        note('next json: ' + errMsg(e).slice(0, 60));
+    }
+    return [];
+}
+
+function toGenres(s) {
+    const g = s.Genre || s.genre || s.genres || [];
+    if (typeof g === 'string') return g.split(',').map(x => x.trim()).filter(Boolean);
+    if (Array.isArray(g)) {
+        return g.map(x => (typeof x === 'string' ? x : (x && (x.name || x.title)))).filter(Boolean);
+    }
+    return [];
+}
+
+// ---------- kontrak KonMik ----------
+
+const KonmikExtension = {
+
+    // Daftar komik (katalog + pencarian)
+    async getList(page, query, filters) {
+        const p = page || 1;
+        const q = (query || '').trim();
+        let path = '/komik?page=' + p + '&limit=24&sortBy=newKomik&name=' + enc(q);
+        if (!q) {
+            const rating = (filters && filters.rating) ? String(filters.rating).toLowerCase() : 'normal';
+            path += '&contentRating=' + enc(rating);
+        }
+
+        try {
+            let rows = null;
+            const json = await tryApi(path);
+            let apiOk = false;
+            if (json) {
+                apiOk = true;
+                rows = Array.isArray(json) ? json : (json.data || []);
+            }
+
+            if (!rows || rows.length === 0) {
+                if (apiOk && (q || p > 1)) return { manga_list: [] };
+                const fb = await listFallback(p, q);
+                if (fb.length) {
+                    rows = fb;
+                    // halaman >1 yang isinya sama dengan halaman 1 = fallback tidak mendukung paging
+                    const key = q + '#';
+                    const first = fb[0].title_slug || fb[0].slug;
+                    if (p === 1) _firstSlug[key] = first;
+                    else if (_firstSlug[key] === first) return { manga_list: [] };
+                } else {
+                    if (q || p > 1) return { manga_list: [] };
+                    return debugCard('DEBUG: daftar kosong | ' + diag());
+                }
+            }
+
+            const list = mapRows(rows);
+            if (list.length === 0) {
+                return debugCard('DEBUG: field slug tidak ketemu, keys=' + Object.keys(rows[0]).join(',').slice(0, 150));
+            }
+            return { manga_list: list };
+        } catch (e) {
+            return debugCard('ERROR: ' + errMsg(e).slice(0, 150) + ' | ' + diag());
+        }
+    },
+
+    // Detail komik + semua chapter. slug = title_slug
+    async getDetail(slug) {
+        let comic = null;
+        let pageChapters = [];
+        let pageHtml = '';
+        try {
+            const pg = await fetchPage(SITE + '/' + pageSlugOf(slug));
+            pageHtml = pg.html;
+            if (pg.data) {
+                comic = findComic(pg.data);
+                pageChapters = collectChapters(pg.data);
+                if (!pageChapters.length) note('detail ' + ndShape(pg.data));
+            } else {
+                note('detail html: tanpa NEXT_DATA len=' + pg.html.length);
+            }
+        } catch (e) {
+            note('detail html: ' + errMsg(e).slice(0, 60));
+        }
+        const s = comic || {};
+
+        let all = [];
+        const ch = await tryApi('/komik/' + enc(slug) + '/chapter?limit=9999999');
+        if (ch) all = [].concat(ch.chapter || [], ch.newChapter || [], ch.startChapter || []);
+        if (!all.length) all = pageChapters;
+        if (!all.length) {
+            try {
+                const j = await fetchNextJson('/' + pageSlugOf(slug) + '.json');
+                if (j) all = collectChapters(j);
+            } catch (e) {
+                note('detail json: ' + errMsg(e).slice(0, 60));
+            }
+        }
+        // Daftar chapter dari API tidak tersedia: susun 001..N dari "Chapter Terbaru" (nomor reader 3 digit)
+        if (!all.length) {
+            const latest = latestChapterOf(pageHtml, comic);
+            if (latest >= 1) {
+                const maxN = Math.min(Math.floor(latest), 3000);
+                for (let n = maxN; n >= 1; n--) all.push({ chapter: pad3(n) });
+                if (latest > maxN || latest !== Math.floor(latest)) all.unshift({ chapter: pad3(latest) });
+                note('chapter disusun 1..' + latest);
+            }
+        }
+        if (!all.length) {
+            // Tampilkan penyebabnya di layar (app menyembunyikan error yang dilempar)
+            return {
+                title: s.title || humanize(slug),
+                cover_url: coverUrl(s),
+                description: 'Dth && o[0] && typeof o[0] === 'object' &&
+            o[0].chapter !== undefined && o[0].chapter !== null) {
+            all = all.concat(o);
+        }
+    });
+    return all;
+}
+
+const IMG_RE = /^(https?:)?\/\/[^\s"']+\.(jpe?g|png|webp|gif|avif)(\?[^\s"']*)?$/i;
+
+function findImages(obj) {
+    let best = null;
+    walk(obj, 0, o => {
+        if (!Array.isArray(o)) {
+            if (Array.isArray(o.imageSrc) && o.imageSrc.length) best = best && best.pref ? best : { arr: o.imageSrc, pref: true };
+            return;
+        }
+        if (o.length && typeof o[0] === 'string') {
+            const ok = o.filter(u => IMG_RE.test(String(u)));
+            if (ok.length >= 2 && (!best || (!best.pref && ok.length > best.arr.length))) best = { arr: ok, pref: false };
+        }
+    });
+    return best ? best.arr : [];
+}
+
+function imagesFromHtml(html) {
+    const re = /(?:https?:)?\/\/[^\s"'\\<>()]+\.(?:jpe?g|png|webp|avif)(?:\?[^\s"'\\<>()]*)?/gi;
+    const seen = {};
+    const out = [];
+    let m;
+    while ((m = re.exec(html))) {
+        const u = m[0];
+        if (seen[u] || /cover|icon|logo|avatar|banner|favicon|thumb/i.test(u)) continue;
+        seen[u] = true;
+        out.push(u);
+    }
+    return out.length >= 2 ? out : [];
+}
+
 function pageSlugOf(slug) {
     return /-bahasa-indonesia$/.test(slug) ? slug : slug + '-bahasa-indonesia';
 }
