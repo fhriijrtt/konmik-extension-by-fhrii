@@ -48,20 +48,28 @@ const KonmikExtension = {
         const url = API + '/query?page=' + p +
             '&perPage=20&series_type=Comic' +
             '&query_string=' + encodeURIComponent(query || '') +
-            '&order=desc&orderBy=latest&adult=true&status=All&tags_ids=[]';
+            '&order=desc&orderBy=latest&adult=true&status=All&tags_ids=%5B%5D';
 
-        const json = await getJson(url);
-        const rows = Array.isArray(json) ? json : (json.data || []);
+        try {
+            const json = await getJson(url);
+            const rows = Array.isArray(json) ? json : (json.data || []);
 
-        const mangaList = rows.map(m => ({
-            id: m.series_slug,
-            title: m.title,
-            cover_url: fullUrl(m.thumbnail),
-            rating: m.rating ? String(m.rating) : '0.0',
-            views: m.total_views ? String(m.total_views) : '-'
-        }));
+            const mangaList = rows.map(m => ({
+                id: m.series_slug,
+                title: m.title,
+                cover_url: fullUrl(m.thumbnail),
+                rating: m.rating ? String(m.rating) : '0.0',
+                views: m.total_views ? String(m.total_views) : '-'
+            }));
 
-        return { manga_list: mangaList };
+            if (mangaList.length === 0) {
+                return { manga_list: [{ id: 'debug', title: 'DEBUG: data kosong (page ' + p + ')', cover_url: '', rating: '0.0', views: '-' }] };
+            }
+            return { manga_list: mangaList };
+        } catch (e) {
+            // Sementara: tampilkan error sebagai kartu supaya penyebabnya kelihatan di app
+            return { manga_list: [{ id: 'debug', title: 'ERROR: ' + String(e && e.message ? e.message : e).slice(0, 150), cover_url: '', rating: '0.0', views: '-' }] };
+        }
     },
 
     // Detail komik + semua chapter
