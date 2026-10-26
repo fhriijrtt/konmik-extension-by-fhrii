@@ -1,6 +1,6 @@
 // ID: ext_wurmz
 // NAME: Wurmz
-// VERSION: 1.0.0
+// VERSION: 1.1.0
 // COLOR: #FF5722
 // ICON: https://wurmz.net/favicon.ico
 // REFERER: https://wurmz.net/
@@ -41,16 +41,24 @@ const KonmikExtension = {
         
         try {
             const html = await fetchHtml(url);
-            // Regex MangaThemesia Card (.bsx)
-            const cardRegex = /<div class="bsx">[\s\S]*?<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[\s\S]*?(?:data-src|src)="([^"]+)"[\s\S]*?(?:<div class="tt">([^<]+)<\/div>)?/gi;
-            const matches = extractAll(cardRegex, html);
+            
+            // Pola alternatif yang lebih fleksibel untuk menangkap kartu komik
+            const cardRegex = /<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[\s\S]*?(?:data-src|src)="([^"]+)"[\s\S]*?(?:<div class="tt">([^<]+)<\/div>)?/gi;
+            let matches = extractAll(cardRegex, html);
+            
+            // Jika regex pertama kosong, gunakan pola fallback yang lebih luas
+            if (matches.length === 0) {
+                const fallbackRegex = /<div class="[^"]*(?:bsx|kanan|limit|animepost)[^"]*">[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<(?:div|h3)[^>]*>([^<]+)<\/(?:div|h3)>/gi;
+                matches = extractAll(fallbackRegex, html);
+            }
+
             const mangaList = [];
             const seen = new Set();
 
             for (const m of matches) {
                 const urlPath = m[1];
-                let title = m[2] || m[4] || 'Unknown Title';
-                let cover = m[3] || '';
+                let title = m[2] || m[3] || m[4] || 'Unknown Title';
+                let cover = m[2]?.startsWith('http') ? m[2] : (m[3] || '');
                 
                 if (cover.includes('?')) cover = cover.split('?')[0];
                 if (seen.has(urlPath)) continue;
@@ -106,7 +114,6 @@ const KonmikExtension = {
             });
         }
 
-        // Fallback chapter list jika struktur sedikit beda
         if (chapters.length === 0) {
             const altChapterRegex = /<div class="chatt">\s*<a[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
             const altMatches = extractAll(altChapterRegex, html);
