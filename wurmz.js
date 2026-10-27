@@ -1,6 +1,6 @@
 // ID: ext_wurmz
 // NAME: Wurmz
-// VERSION: 1.3.0
+// VERSION: 1.4.0
 // COLOR: #FF5722
 // ICON: https://wurmz.net/favicon.ico
 // REFERER: https://wurmz.net/
@@ -32,7 +32,7 @@ function extractAll(regex, str) {
 }
 
 var KonmikExtension = {
-    // 1. Scraper Daftar Komik & Pencarian
+    // 1. Scraper Daftar Komik & Pencarian (Ditingkatkan agar sangat fleksibel)
     async getList(page, query, filters) {
         var p = page || 1;
         var url = query 
@@ -44,29 +44,37 @@ var KonmikExtension = {
             var mangaList = [];
             var seen = {};
 
-            // Pola 1: Mencari elemen card standard MangaThemesia (.bsx atau .bs)
-            var cardRegex = /<div class="bsx?">[\s\S]*?<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[\s\S]*?(?:data-src|src)="([^"]+)"/gi;
-            var matches = extractAll(cardRegex, html);
-
-            // Pola 2: Jika kosong, gunakan pola universal untuk tag <a> yang membungkus gambar dan judul
-            if (matches.length === 0) {
-                var universalRegex = /<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[\s\S]*?<img[^>]+(?:data-src|src)="([^"]+)"/gi;
-                matches = extractAll(universalRegex, html);
-            }
+            // Mencari semua elemen tag <a> yang memiliki href dan di dalamnya ada <img>
+            var aRegex = /<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+            var matches = extractAll(aRegex, html);
 
             for (var i = 0; i < matches.length; i++) {
-                var m = matches[i];
-                var urlPath = m[1];
-                var title = m[2] || 'Unknown Title';
-                var cover = m[3] || '';
-                
-                if (cover.indexOf('?') !== -1) cover = cover.split('?')[0];
-                if (!urlPath || seen[urlPath]) continue;
-                seen[urlPath] = true;
+                var fullMatch = matches[i][0];
+                var urlPath = matches[i][1];
+                var innerHtml = matches[i][2];
 
-                // Bersihkan judul jika terambil tag HTML
+                // Abaikan link navigasi halaman, javascript, atau link internal non-komik
+                if (!urlPath || urlPath.indexOf('/page/') !== -1 || urlPath.indexOf('#') !== -1) continue;
+
+                // Pastikan ada gambar cover di dalam tag <a> tersebut
+                var imgMatch = innerHtml.match(/(?:data-src|data-lazy-src|src)="([^"]+)"/i);
+                if (!imgMatch) continue;
+                
+                var cover = imgMatch[1];
+                if (cover.indexOf('?') !== -1) cover = cover.split('?')[0];
+                if (cover.indexOf('data:image') !== -1) continue; // Abaikan placeholder kosong
+
+                // Ambil judul dari atribut title, tag h3/div, atau alt gambar
+                var titleMatch = fullMatch.match(/title="([^"]+)"/i) || 
+                                 innerHtml.match(/<(?:h3|div|span)[^>]*class="[^"]*(?:tt|title|entry-title)[^"]*"[^>]*>([^<]+)<\/(?:h3|div|span)>/i) || 
+                                 innerHtml.match(/<img[^>]*alt="([^"]+)"/i);
+                
+                var title = titleMatch ? titleMatch[1] : 'Komik Wurmz';
                 title = title.replace(/<[^>]*>/g, '').trim();
-                if (!title) title = 'Komik Wurmz';
+
+                if (!title || title.length < 2) continue;
+                if (seen[urlPath]) continue;
+                seen[urlPath] = true;
 
                 mangaList.push({
                     id: urlPath,
@@ -78,7 +86,7 @@ var KonmikExtension = {
             }
 
             if (mangaList.length === 0) {
-                return { manga_list: [{ id: 'debug', title: 'DEBUG: Gagal parsing kartu (Len=' + html.length + ')', cover_url: '', rating: '0.0', views: '-' }] };
+                return { manga_list: [{ id: 'debug', title: 'DEBUG: Masih kosong (Len=' + html.length + ')', cover_url: '', rating: '0.0', views: '-' }] };
             }
 
             return { manga_list: mangaList };
